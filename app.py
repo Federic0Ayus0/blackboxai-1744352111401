@@ -1,4 +1,6 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, session
+import datetime
+import re
 from datetime import timedelta
 from database import create_tables
 from config import logger
@@ -6,6 +8,16 @@ import sqlite3
 from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
 import os
+
+class Invoice:
+    def __init__(self, invoice_number, customer_id, items, total_amount, issue_date=None, due_date=None, user_id=None):
+        self.invoice_number = invoice_number
+        self.customer_id = customer_id
+        self.items = items
+        self.total_amount = total_amount
+        self.issue_date = issue_date if issue_date else datetime.date.today().strftime('%Y-%m-%d')
+        self.due_date = due_date
+        self.user_id = user_id
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)  # For session management and flash messages
@@ -141,5 +153,62 @@ def quotations():
     finally:
         conn.close()
 
-if __name__ == '__main__':
-    app.run(debug=True, port=8000)
+@app.route('/invoices/new')
+@login_required
+def new_invoice():
+    return render_template('new_invoice.html')
+
+@app.route('/invoices/create', methods=['POST'])
+@login_required
+def create_invoice():
+    try:
+        # Get form data
+        customer_name = request.form['customer_name']
+        customer_email = request.form['customer_email']
+        invoice_number = request.form['invoice_number']
+        issue_date = request.form['issue_date']
+        due_date = request.form['due_date']
+        
+        # Process items
+        items = []
+        total_amount = 0
+        i = 0
+        while f'items[{i}][name]' in request.form:
+            item = {
+                'name': request.form[f'items[{i}][name]'],
+                'quantity': int(request.form[f'items[{i}][quantity]']),
+                'price': float(request.form[f'items[{i}][price]'])
+            }
+            item_total = item['quantity'] * item['price']
+            total_amount += item_total
+            items.append(item)
+            i += 1
+
+        # Save to database
+        conn = sqlite3.connect('invoice_system.db')
+        cursor = conn.cursor()
+        
+        # Insert invoice
+        cursor.execute("""
+            INSERT INTO invoices (invoice_number, customer, issue_date, due_date, total_amount, user_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (invoice_number, customer_name, issue_date, due_date, total_amount, session['user_id']))
+        
+        # Insert invoice items
+        for item in items:
+            cursor.execute("""
+                INSERT INTO invoice_items (invoice_number, item_name, quantity, price)
+                VALUES (?, ?, ?, ?)
+            """, (invoice_number, item['name'], item['quantity'], item['price']))
+        
+        conn.commit()
+        
+        flash('Invoice created successfully!')
+        return redirect(url_for('invoices'))
+    
+    except Exception as e:
+        logger.error(f"Error creating invoice: {str(e)}")
+        flash('Error creating invoice')
+        return redirect(url_for('new_invoice'))
+    finally:
+        conn.close()
